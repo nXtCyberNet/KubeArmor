@@ -107,7 +107,7 @@ func NewNetworkPolicyEnforcer(logger *fd.Feeder) (*NetworkPolicyEnforcer, error)
 	// monitor logged packets
 	go ne.monitorLoggedPackets()
 
-	ne.UpdateNetworkSecurityPolicies([]tp.NetworkSecurityPolicy{})
+	ne.UpdateNetworkSecurityPolicies([]tp.NetworkSecurityPolicy{}, map[string]tp.DefaultPosture{}, map[string][]string{})
 
 	return ne, nil
 }
@@ -368,63 +368,35 @@ func (ne *NetworkPolicyEnforcer) UpdateNetworkSecurityPolicies(secPolicies []tp.
 		}
 	}
 
-	if strings.EqualFold(posture.NetworkAction, "audit") {
-		// swap drop → accept but keep logging
-		newRules = append(newRules, NetworkRule{
-			TableFamily: "ip",
-			Chain:       "OUTPUT",
-			RuleContent: fmt.Sprintf(
-				"ip saddr %s log prefix \"Default OUTPUT Audit\" group 0 accept",
-				podIP,
-			),
-		})
+	// log prefix format: "PolicyName Chain Action" (e.g., "Default INPUT Block")
 
-		if strings.EqualFold(posture.NetworkAction, "audit") {
-			// swap drop → accept but keep logging
-			newRules = append(newRules, NetworkRule{
-				TableFamily: "ip",
-				Chain:       "OUTPUT",
-				RuleContent: fmt.Sprintf(
-					"ip saddr %s log prefix \"Default OUTPUT Audit\" group 0 accept",
-					podIP,
-				),
-			})
+	// INPUT Rule
+	inputPrefix := fmt.Sprintf("%s INPUT %s", policyName, actionKeyword)
+	inputRule := fmt.Sprintf("log prefix %q group 0 %s", inputPrefix, defaultAction)
+
+	// OUTPUT Rule
+	outputPrefix := fmt.Sprintf("%s OUTPUT %s", policyName, actionKeyword)
+	outputRule := fmt.Sprintf("log prefix %q group 0 %s", outputPrefix, defaultAction)
+
+	// Append rules
+	newRules = append(newRules,
+		NetworkRule{TableFamily: "ip", Chain: "INPUT", RuleContent: inputRule},
+		NetworkRule{TableFamily: "ip", Chain: "OUTPUT", RuleContent: outputRule},
+		NetworkRule{TableFamily: "ip6", Chain: "INPUT", RuleContent: inputRule},
+		NetworkRule{TableFamily: "ip6", Chain: "OUTPUT", RuleContent: outputRule},
+	)
+
+	namespacesWithPolicy := map[string]bool{}
+	for _, policy := range secPolicies {
+		if ns, ok := policy.Metadata["namespaceName"]; ok {
+			namespacesWithPolicy[ns] = true
 		}
+	}
 
-		// log prefix format: "PolicyName Chain Action" (e.g., "Default INPUT Block")
-
-		// INPUT Rule
-		inputPrefix := fmt.Sprintf("%s INPUT %s", policyName, actionKeyword)
-		inputRule := fmt.Sprintf("log prefix %q group 0 %s", inputPrefix, defaultAction)
-
-		// OUTPUT Rule
-		outputPrefix := fmt.Sprintf("%s OUTPUT %s", policyName, actionKeyword)
-		outputRule := fmt.Sprintf("log prefix %q group 0 %s", outputPrefix, defaultAction)
-
-		// Append rules
-		newRules = append(newRules,
-			NetworkRule{TableFamily: "ip", Chain: "INPUT", RuleContent: inputRule},
-			NetworkRule{TableFamily: "ip", Chain: "OUTPUT", RuleContent: outputRule},
-			NetworkRule{TableFamily: "ip6", Chain: "INPUT", RuleContent: inputRule},
-			NetworkRule{TableFamily: "ip6", Chain: "OUTPUT", RuleContent: outputRule},
-		)
-
-		ne.Rules = newRules
-
-		if err := ne.applyNFTables(hasAllowPolicy); err != nil {
-			ne.Logger.Errf("Failed to apply network policies: %v", err)
-		}
-
-		namespacesWithPolicy := map[string]bool{}
-		for _, policy := range secPolicies {
-			if ns, ok := policy.Metadata["namespaceName"]; ok {
-				namespacesWithPolicy[ns] = true
-			}
-		}
-
-		for namespace, posture := range defaultPostures {
-			if strings.EqualFold(posture.NetworkAction, "block") && !namespacesWithPolicy[namespace] {
-				podIPs := podsByNamespace[namespace]
+	for namespace, posture := range defaultPostures {
+		if !namespacesWithPolicy[namespace] {
+			podIPs := podsbyNamespace[namespace]
+			if strings.EqualFold(posture.NetworkAction, "block") {
 				for _, podIP := range podIPs {
 					// Exempt DNS first — prevents CoreDNS blackout
 					newRules = append(newRules,
@@ -456,8 +428,25 @@ func (ne *NetworkPolicyEnforcer) UpdateNetworkSecurityPolicies(secPolicies []tp.
 						},
 					)
 				}
+			} else if strings.EqualFold(posture.NetworkAction, "audit") {
+				for _, podIP := range podIPs {
+					newRules = append(newRules, NetworkRule{
+						TableFamily: "ip",
+						Chain:       "OUTPUT",
+						RuleContent: fmt.Sprintf(
+							"ip saddr %s log prefix \"Default OUTPUT Audit\" group 0 accept",
+							podIP,
+						),
+					})
+				}
 			}
 		}
+	}
+
+	ne.Rules = newRules
+
+	if err := ne.applyNFTables(hasAllowPolicy); err != nil {
+		ne.Logger.Errf("Failed to apply network policies: %v", err)
 	}
 }
 
