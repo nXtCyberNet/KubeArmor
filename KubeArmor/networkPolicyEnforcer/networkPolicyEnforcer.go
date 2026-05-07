@@ -56,12 +56,6 @@ type NetworkPolicyEnforcer struct {
 	LogCache sync.Map
 }
 
-// these are exempted from block policies to avoid breaking DNS resolution for the host and kubelet, which can lead to cascading failures. These IPs are commonly used for cluster DNS services and node-local DNS caches, and blocking them could disrupt critical cluster operations.
-var coreDNSExemptions = []string{
-	"10.96.0.10",    // default kube-dns ClusterIP
-	"169.254.20.10", // node-local DNS if enabled
-}
-
 // NewNetworkPolicyEnforcer Function
 func NewNetworkPolicyEnforcer(logger *fd.Feeder) (*NetworkPolicyEnforcer, error) {
 
