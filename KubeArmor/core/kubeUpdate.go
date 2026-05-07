@@ -2577,7 +2577,7 @@ func (dm *KubeArmorDaemon) UpdateNetworkSecurityPolicies() {
 		dm.Logger.UpdateNetworkSecurityPolicies("UPDATED", secPolicies)
 
 		// enforce network policies
-		dm.NetworkPolicyEnforcer.UpdateNetworkSecurityPolicies(secPolicies)
+		dm.NetworkPolicyEnforcer.UpdateNetworkSecurityPolicies(secPolicies, dm.DefaultPostures, K8s.ResolvePodsByNamespace(), dm.RuntimeEnforcer.EnforcerType, K8s.ResolveCoreDNSIPs())
 	}
 }
 
@@ -2900,6 +2900,15 @@ func (dm *KubeArmorDaemon) UpdateDefaultPostureWithCM(endPoint *tp.EndPoint, act
 		}
 	}
 
+	if cfg.GlobalCfg.NetworkPolicyEnforcer {
+		if dm.NetworkPolicyEnforcer != nil {
+			if !kl.ContainsElement(cfg.GlobalCfg.ConfigUntrackedNs.Load().([]string), endPoint.NamespaceName) {
+				dm.UpdateNetworkSecurityPolicies()
+			} else {
+				dm.Logger.Warnf("Network posture cannot be enforced in untracked namespace %s", endPoint.NamespaceName)
+			}
+		}
+	}
 }
 
 // returns default posture and a boolean value states, if annotation is set or not

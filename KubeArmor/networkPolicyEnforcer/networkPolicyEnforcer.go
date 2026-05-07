@@ -101,7 +101,7 @@ func NewNetworkPolicyEnforcer(logger *fd.Feeder) (*NetworkPolicyEnforcer, error)
 	// monitor logged packets
 	go ne.monitorLoggedPackets()
 
-	ne.UpdateNetworkSecurityPolicies([]tp.NetworkSecurityPolicy{})
+	ne.UpdateNetworkSecurityPolicies([]tp.NetworkSecurityPolicy{}, map[string]tp.DefaultPosture{}, map[string][]string{}, "", []string{})
 
 	return ne, nil
 }
@@ -301,7 +301,7 @@ func (ne *NetworkPolicyEnforcer) monitorLoggedPackets() {
 }
 
 // UpdateHostSecurityPolicies Function
-func (ne *NetworkPolicyEnforcer) UpdateNetworkSecurityPolicies(secPolicies []tp.NetworkSecurityPolicy) {
+func (ne *NetworkPolicyEnforcer) UpdateNetworkSecurityPolicies(secPolicies []tp.NetworkSecurityPolicy, defaultPostures map[string]tp.DefaultPosture, podsbyNamespace map[string][]string, enforcerType string, coreDNSIPs []string) {
 	ne.RulesLock.Lock()
 	defer ne.RulesLock.Unlock()
 
@@ -379,6 +379,80 @@ func (ne *NetworkPolicyEnforcer) UpdateNetworkSecurityPolicies(secPolicies []tp.
 		NetworkRule{TableFamily: "ip6", Chain: "INPUT", RuleContent: inputRule},
 		NetworkRule{TableFamily: "ip6", Chain: "OUTPUT", RuleContent: outputRule},
 	)
+
+	namespacesWithPolicy := map[string]bool{}
+	for _, policy := range secPolicies {
+		if ns, ok := policy.Metadata["namespaceName"]; ok {
+			namespacesWithPolicy[ns] = true
+		}
+	}
+
+	if enforcerType != "BPFLSM" {
+		for namespace, posture := range defaultPostures {
+			if !namespacesWithPolicy[namespace] {
+				podIPs := podsbyNamespace[namespace]
+				if strings.EqualFold(posture.NetworkAction, "block") {
+					for _, podIP := range podIPs {
+
+						for _, dnsIP := range coreDNSIPs {
+							newRules = append(newRules,
+								NetworkRule{
+									TableFamily: "ip",
+									Chain:       "OUTPUT",
+									RuleContent: fmt.Sprintf("ip daddr %s udp dport 53 accept", dnsIP),
+								},
+								NetworkRule{
+									TableFamily: "ip",
+									Chain:       "OUTPUT",
+									RuleContent: fmt.Sprintf("ip daddr %s tcp dport 53 accept", dnsIP),
+								},
+							)
+						}
+
+						newRules = append(newRules,
+							NetworkRule{
+								TableFamily: "ip",
+								Chain:       "OUTPUT",
+								RuleContent: fmt.Sprintf("ip saddr %s udp dport 53 accept", podIP),
+							},
+							NetworkRule{
+								TableFamily: "ip",
+								Chain:       "OUTPUT",
+								RuleContent: fmt.Sprintf("ip saddr %s tcp dport 53 accept", podIP),
+							},
+							NetworkRule{
+								TableFamily: "ip",
+								Chain:       "OUTPUT",
+								RuleContent: fmt.Sprintf(
+									"ip saddr %s log prefix \"Default OUTPUT Block\" group 0 drop",
+									podIP,
+								),
+							},
+							NetworkRule{
+								TableFamily: "ip6",
+								Chain:       "OUTPUT",
+								RuleContent: fmt.Sprintf(
+									"ip6 saddr %s log prefix \"Default OUTPUT Block\" group 0 drop",
+									podIP,
+								),
+							},
+						)
+					}
+				} else if strings.EqualFold(posture.NetworkAction, "audit") {
+					for _, podIP := range podIPs {
+						newRules = append(newRules, NetworkRule{
+							TableFamily: "ip",
+							Chain:       "OUTPUT",
+							RuleContent: fmt.Sprintf(
+								"ip saddr %s log prefix \"Default OUTPUT Audit\" group 0 accept",
+								podIP,
+							),
+						})
+					}
+				}
+			}
+		}
+	}
 
 	ne.Rules = newRules
 
