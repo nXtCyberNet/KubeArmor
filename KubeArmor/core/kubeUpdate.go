@@ -2577,7 +2577,7 @@ func (dm *KubeArmorDaemon) UpdateNetworkSecurityPolicies() {
 		dm.Logger.UpdateNetworkSecurityPolicies("UPDATED", secPolicies)
 
 		// enforce network policies
-		dm.NetworkPolicyEnforcer.UpdateNetworkSecurityPolicies(secPolicies, dm.DefaultPostures, K8s.ResolvePodsByNamespace())
+		dm.NetworkPolicyEnforcer.UpdateNetworkSecurityPolicies(secPolicies, dm.DefaultPostures, K8s.ResolvePodsByNamespace(), dm.RuntimeEnforcer.EnforcerType)
 	}
 }
 

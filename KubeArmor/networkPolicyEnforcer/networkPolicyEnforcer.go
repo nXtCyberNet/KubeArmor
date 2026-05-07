@@ -107,7 +107,7 @@ func NewNetworkPolicyEnforcer(logger *fd.Feeder) (*NetworkPolicyEnforcer, error)
 	// monitor logged packets
 	go ne.monitorLoggedPackets()
 
-	ne.UpdateNetworkSecurityPolicies([]tp.NetworkSecurityPolicy{}, map[string]tp.DefaultPosture{}, map[string][]string{})
+	ne.UpdateNetworkSecurityPolicies([]tp.NetworkSecurityPolicy{}, map[string]tp.DefaultPosture{}, map[string][]string{}, "")
 
 	return ne, nil
 }
@@ -307,7 +307,7 @@ func (ne *NetworkPolicyEnforcer) monitorLoggedPackets() {
 }
 
 // UpdateHostSecurityPolicies Function
-func (ne *NetworkPolicyEnforcer) UpdateNetworkSecurityPolicies(secPolicies []tp.NetworkSecurityPolicy, defaultPostures map[string]tp.DefaultPosture, podsbyNamespace map[string][]string) {
+func (ne *NetworkPolicyEnforcer) UpdateNetworkSecurityPolicies(secPolicies []tp.NetworkSecurityPolicy, defaultPostures map[string]tp.DefaultPosture, podsbyNamespace map[string][]string, enforcerType string) {
 	ne.RulesLock.Lock()
 	defer ne.RulesLock.Unlock()
 
@@ -393,51 +393,53 @@ func (ne *NetworkPolicyEnforcer) UpdateNetworkSecurityPolicies(secPolicies []tp.
 		}
 	}
 
-	for namespace, posture := range defaultPostures {
-		if !namespacesWithPolicy[namespace] {
-			podIPs := podsbyNamespace[namespace]
-			if strings.EqualFold(posture.NetworkAction, "block") {
-				for _, podIP := range podIPs {
-					// Exempt DNS first — prevents CoreDNS blackout
-					newRules = append(newRules,
-						NetworkRule{
-							TableFamily: "ip",
-							Chain:       "OUTPUT",
-							RuleContent: fmt.Sprintf("ip saddr %s udp dport 53 accept", podIP),
-						},
-						NetworkRule{
-							TableFamily: "ip",
-							Chain:       "OUTPUT",
-							RuleContent: fmt.Sprintf("ip saddr %s tcp dport 53 accept", podIP),
-						},
-						NetworkRule{
+	if enforcerType != "BPFLSM" {
+		for namespace, posture := range defaultPostures {
+			if !namespacesWithPolicy[namespace] {
+				podIPs := podsbyNamespace[namespace]
+				if strings.EqualFold(posture.NetworkAction, "block") {
+					for _, podIP := range podIPs {
+						// Exempt DNS first — prevents CoreDNS blackout
+						newRules = append(newRules,
+							NetworkRule{
+								TableFamily: "ip",
+								Chain:       "OUTPUT",
+								RuleContent: fmt.Sprintf("ip saddr %s udp dport 53 accept", podIP),
+							},
+							NetworkRule{
+								TableFamily: "ip",
+								Chain:       "OUTPUT",
+								RuleContent: fmt.Sprintf("ip saddr %s tcp dport 53 accept", podIP),
+							},
+							NetworkRule{
+								TableFamily: "ip",
+								Chain:       "OUTPUT",
+								RuleContent: fmt.Sprintf(
+									"ip saddr %s log prefix \"Default OUTPUT Block\" group 0 drop",
+									podIP,
+								),
+							},
+							NetworkRule{
+								TableFamily: "ip6",
+								Chain:       "OUTPUT",
+								RuleContent: fmt.Sprintf(
+									"ip6 saddr %s log prefix \"Default OUTPUT Block\" group 0 drop",
+									podIP,
+								),
+							},
+						)
+					}
+				} else if strings.EqualFold(posture.NetworkAction, "audit") {
+					for _, podIP := range podIPs {
+						newRules = append(newRules, NetworkRule{
 							TableFamily: "ip",
 							Chain:       "OUTPUT",
 							RuleContent: fmt.Sprintf(
-								"ip saddr %s log prefix \"Default OUTPUT Block\" group 0 drop",
+								"ip saddr %s log prefix \"Default OUTPUT Audit\" group 0 accept",
 								podIP,
 							),
-						},
-						NetworkRule{
-							TableFamily: "ip6",
-							Chain:       "OUTPUT",
-							RuleContent: fmt.Sprintf(
-								"ip6 saddr %s log prefix \"Default OUTPUT Block\" group 0 drop",
-								podIP,
-							),
-						},
-					)
-				}
-			} else if strings.EqualFold(posture.NetworkAction, "audit") {
-				for _, podIP := range podIPs {
-					newRules = append(newRules, NetworkRule{
-						TableFamily: "ip",
-						Chain:       "OUTPUT",
-						RuleContent: fmt.Sprintf(
-							"ip saddr %s log prefix \"Default OUTPUT Audit\" group 0 accept",
-							podIP,
-						),
-					})
+						})
+					}
 				}
 			}
 		}
