@@ -459,6 +459,25 @@ func (kh *K8sHandler) WatchK8sNetworkSecurityPolicies() *http.Response {
 	return resp
 }
 
+// / helper function to get the podIDs in a namespace
+func (kh *K8sHandler) ResolvePodsByNamespace() map[string][]string {
+	result := map[string][]string{}
+
+	podList, err := kh.K8sClient.CoreV1().Pods("").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		kg.Errf("Failed to list pods for network posture resolution: %v", err)
+		return result
+	}
+
+	for _, pod := range podList.Items {
+		if pod.Status.PodIP != "" {
+			result[pod.Namespace] = append(result[pod.Namespace], pod.Status.PodIP)
+		}
+	}
+
+	return result
+}
+
 // this function get the owner details of a pod
 func getTopLevelOwner(obj metav1.ObjectMeta, namespace string, objkind string) (string, string, string, error) {
 	ownerRef := kl.GetControllingPodOwner(obj.OwnerReferences)
