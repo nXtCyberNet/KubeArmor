@@ -107,7 +107,7 @@ func NewNetworkPolicyEnforcer(logger *fd.Feeder) (*NetworkPolicyEnforcer, error)
 	// monitor logged packets
 	go ne.monitorLoggedPackets()
 
-	ne.UpdateNetworkSecurityPolicies([]tp.NetworkSecurityPolicy{}, map[string]tp.DefaultPosture{}, map[string][]string{}, "")
+	ne.UpdateNetworkSecurityPolicies([]tp.NetworkSecurityPolicy{}, map[string]tp.DefaultPosture{}, map[string][]string{}, "", []string{})
 
 	return ne, nil
 }
@@ -307,7 +307,7 @@ func (ne *NetworkPolicyEnforcer) monitorLoggedPackets() {
 }
 
 // UpdateHostSecurityPolicies Function
-func (ne *NetworkPolicyEnforcer) UpdateNetworkSecurityPolicies(secPolicies []tp.NetworkSecurityPolicy, defaultPostures map[string]tp.DefaultPosture, podsbyNamespace map[string][]string, enforcerType string) {
+func (ne *NetworkPolicyEnforcer) UpdateNetworkSecurityPolicies(secPolicies []tp.NetworkSecurityPolicy, defaultPostures map[string]tp.DefaultPosture, podsbyNamespace map[string][]string, enforcerType string, coreDNSIPs []string) {
 	ne.RulesLock.Lock()
 	defer ne.RulesLock.Unlock()
 
@@ -399,7 +399,22 @@ func (ne *NetworkPolicyEnforcer) UpdateNetworkSecurityPolicies(secPolicies []tp.
 				podIPs := podsbyNamespace[namespace]
 				if strings.EqualFold(posture.NetworkAction, "block") {
 					for _, podIP := range podIPs {
-						// Exempt DNS first — prevents CoreDNS blackout
+
+						for _, dnsIP := range coreDNSIPs {
+							newRules = append(newRules,
+								NetworkRule{
+									TableFamily: "ip",
+									Chain:       "OUTPUT",
+									RuleContent: fmt.Sprintf("ip daddr %s udp dport 53 accept", dnsIP),
+								},
+								NetworkRule{
+									TableFamily: "ip",
+									Chain:       "OUTPUT",
+									RuleContent: fmt.Sprintf("ip daddr %s tcp dport 53 accept", dnsIP),
+								},
+							)
+						}
+
 						newRules = append(newRules,
 							NetworkRule{
 								TableFamily: "ip",

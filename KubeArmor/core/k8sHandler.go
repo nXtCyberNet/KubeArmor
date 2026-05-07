@@ -478,6 +478,43 @@ func (kh *K8sHandler) ResolvePodsByNamespace() map[string][]string {
 	return result
 }
 
+func (kh *K8sHandler) ResolveCoreDNSIPs() []string {
+	var ips []string
+
+	// Query kube-dns
+	kubeDNS, err := kh.K8sClient.CoreV1().Services("kube-system").Get(
+		context.Background(),
+		"kube-dns",
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		kg.Warnf("Failed to resolve kube-dns ClusterIP: %v", err)
+	} else if kubeDNS.Spec.ClusterIP != "" && kubeDNS.Spec.ClusterIP != "None" {
+		ips = append(ips, kubeDNS.Spec.ClusterIP)
+	}
+
+	// Query node-local-dns if present (not all clusters have it)
+	nodeDNS, err := kh.K8sClient.CoreV1().Services("kube-system").Get(
+		context.Background(),
+		"node-local-dns",
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		kg.Warnf("node-local-dns service not found, skipping: %v", err)
+	} else if nodeDNS.Spec.ClusterIP != "" && nodeDNS.Spec.ClusterIP != "None" {
+		ips = append(ips, nodeDNS.Spec.ClusterIP)
+	}
+
+	// Only fall back to hardcoded if BOTH queries fail
+	if len(ips) == 0 {
+		kg.Warnf("Could not resolve any DNS ClusterIPs, falling back to defaults")
+		return []string{"10.96.0.10"}
+	}
+
+	kg.Printf("Resolved DNS IPs: %v", ips)
+	return ips
+}
+
 // this function get the owner details of a pod
 func getTopLevelOwner(obj metav1.ObjectMeta, namespace string, objkind string) (string, string, string, error) {
 	ownerRef := kl.GetControllingPodOwner(obj.OwnerReferences)

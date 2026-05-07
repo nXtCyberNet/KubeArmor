@@ -5,8 +5,11 @@ package networkpolicyenforcer
 
 import (
 	"fmt"
+	"strings"
+	"sync"
 	"testing"
 
+	"github.com/go-openapi/testify/v2/assert"
 	tp "github.com/kubearmor/KubeArmor/KubeArmor/types"
 	"k8s.io/utils/ptr"
 )
@@ -128,5 +131,103 @@ func TestGenerateRules(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// networkPolicyEnforcer_test.go
+
+func TestPostureRuleInjection(t *testing.T) {
+	ne := &NetworkPolicyEnforcer{
+		Rules:     []NetworkRule{},
+		RulesLock: &sync.RWMutex{},
+	}
+
+	defaultPostures := map[string]tp.DefaultPosture{
+		"test-namespace": {NetworkAction: "block"},
+	}
+
+	podsByNamespace := map[string][]string{
+		"test-namespace": {"10.0.0.1", "10.0.0.2"},
+	}
+
+	coreDNSIPs := []string{"10.96.0.10"}
+
+	ne.UpdateNetworkSecurityPolicies(
+		[]tp.NetworkSecurityPolicy{},
+		defaultPostures,
+		podsByNamespace,
+		"AppArmor",
+		coreDNSIPs,
+	)
+
+	// Verify DNS exemption rules exist before drop rules
+	dnsFound := false
+	dropFound := false
+	dnsIndex := -1
+	dropIndex := -1
+
+	for i, rule := range ne.Rules {
+		if strings.Contains(rule.RuleContent, "dport 53 accept") {
+			dnsFound = true
+			dnsIndex = i
+		}
+		if strings.Contains(rule.RuleContent, "drop") {
+			dropFound = true
+			dropIndex = i
+		}
+	}
+
+	assert.True(t, dnsFound, "DNS exemption rule missing")
+	assert.True(t, dropFound, "Drop rule missing")
+	assert.Less(t, dnsIndex, dropIndex, "DNS exemption must come before drop rule")
+}
+
+func TestBPFLSMSkipsPostureInjection(t *testing.T) {
+	ne := &NetworkPolicyEnforcer{
+		Rules:     []NetworkRule{},
+		RulesLock: &sync.RWMutex{},
+	}
+
+	defaultPostures := map[string]tp.DefaultPosture{
+		"test-namespace": {NetworkAction: "block"},
+	}
+
+	ne.UpdateNetworkSecurityPolicies(
+		[]tp.NetworkSecurityPolicy{},
+		defaultPostures,
+		map[string][]string{"test-namespace": {"10.0.0.1"}},
+		"BPFLSM", // should skip posture injection
+		[]string{"10.96.0.10"},
+	)
+
+	for _, rule := range ne.Rules {
+		if strings.Contains(rule.RuleContent, "drop") {
+			t.Errorf("Drop rule should not be injected on BPFLSM — found: %s", rule.RuleContent)
+		}
+	}
+}
+
+func TestAuditPostureNoDropRule(t *testing.T) {
+	ne := &NetworkPolicyEnforcer{
+		Rules:     []NetworkRule{},
+		RulesLock: &sync.RWMutex{},
+	}
+
+	defaultPostures := map[string]tp.DefaultPosture{
+		"test-namespace": {NetworkAction: "audit"},
+	}
+
+	ne.UpdateNetworkSecurityPolicies(
+		[]tp.NetworkSecurityPolicy{},
+		defaultPostures,
+		map[string][]string{"test-namespace": {"10.0.0.1"}},
+		"AppArmor",
+		[]string{"10.96.0.10"},
+	)
+
+	for _, rule := range ne.Rules {
+		if strings.Contains(rule.RuleContent, "drop") {
+			t.Errorf("Audit posture should not inject drop rules — found: %s", rule.RuleContent)
+		}
 	}
 }
