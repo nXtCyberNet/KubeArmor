@@ -56,6 +56,12 @@ type NetworkPolicyEnforcer struct {
 	LogCache sync.Map
 }
 
+// these are exempted from block policies to avoid breaking DNS resolution for the host and kubelet, which can lead to cascading failures. These IPs are commonly used for cluster DNS services and node-local DNS caches, and blocking them could disrupt critical cluster operations.
+var coreDNSExemptions = []string{
+	"10.96.0.10",    // default kube-dns ClusterIP
+	"169.254.20.10", // node-local DNS if enabled
+}
+
 // NewNetworkPolicyEnforcer Function
 func NewNetworkPolicyEnforcer(logger *fd.Feeder) (*NetworkPolicyEnforcer, error) {
 
@@ -301,7 +307,7 @@ func (ne *NetworkPolicyEnforcer) monitorLoggedPackets() {
 }
 
 // UpdateHostSecurityPolicies Function
-func (ne *NetworkPolicyEnforcer) UpdateNetworkSecurityPolicies(secPolicies []tp.NetworkSecurityPolicy) {
+func (ne *NetworkPolicyEnforcer) UpdateNetworkSecurityPolicies(secPolicies []tp.NetworkSecurityPolicy, defaultPostures map[string]tp.DefaultPosture, podsbyNamespace map[string][]string) {
 	ne.RulesLock.Lock()
 	defer ne.RulesLock.Unlock()
 
@@ -362,28 +368,96 @@ func (ne *NetworkPolicyEnforcer) UpdateNetworkSecurityPolicies(secPolicies []tp.
 		}
 	}
 
-	// log prefix format: "PolicyName Chain Action" (e.g., "Default INPUT Block")
+	if strings.EqualFold(posture.NetworkAction, "audit") {
+		// swap drop → accept but keep logging
+		newRules = append(newRules, NetworkRule{
+			TableFamily: "ip",
+			Chain:       "OUTPUT",
+			RuleContent: fmt.Sprintf(
+				"ip saddr %s log prefix \"Default OUTPUT Audit\" group 0 accept",
+				podIP,
+			),
+		})
 
-	// INPUT Rule
-	inputPrefix := fmt.Sprintf("%s INPUT %s", policyName, actionKeyword)
-	inputRule := fmt.Sprintf("log prefix %q group 0 %s", inputPrefix, defaultAction)
+		if strings.EqualFold(posture.NetworkAction, "audit") {
+			// swap drop → accept but keep logging
+			newRules = append(newRules, NetworkRule{
+				TableFamily: "ip",
+				Chain:       "OUTPUT",
+				RuleContent: fmt.Sprintf(
+					"ip saddr %s log prefix \"Default OUTPUT Audit\" group 0 accept",
+					podIP,
+				),
+			})
+		}
 
-	// OUTPUT Rule
-	outputPrefix := fmt.Sprintf("%s OUTPUT %s", policyName, actionKeyword)
-	outputRule := fmt.Sprintf("log prefix %q group 0 %s", outputPrefix, defaultAction)
+		// log prefix format: "PolicyName Chain Action" (e.g., "Default INPUT Block")
 
-	// Append rules
-	newRules = append(newRules,
-		NetworkRule{TableFamily: "ip", Chain: "INPUT", RuleContent: inputRule},
-		NetworkRule{TableFamily: "ip", Chain: "OUTPUT", RuleContent: outputRule},
-		NetworkRule{TableFamily: "ip6", Chain: "INPUT", RuleContent: inputRule},
-		NetworkRule{TableFamily: "ip6", Chain: "OUTPUT", RuleContent: outputRule},
-	)
+		// INPUT Rule
+		inputPrefix := fmt.Sprintf("%s INPUT %s", policyName, actionKeyword)
+		inputRule := fmt.Sprintf("log prefix %q group 0 %s", inputPrefix, defaultAction)
 
-	ne.Rules = newRules
+		// OUTPUT Rule
+		outputPrefix := fmt.Sprintf("%s OUTPUT %s", policyName, actionKeyword)
+		outputRule := fmt.Sprintf("log prefix %q group 0 %s", outputPrefix, defaultAction)
 
-	if err := ne.applyNFTables(hasAllowPolicy); err != nil {
-		ne.Logger.Errf("Failed to apply network policies: %v", err)
+		// Append rules
+		newRules = append(newRules,
+			NetworkRule{TableFamily: "ip", Chain: "INPUT", RuleContent: inputRule},
+			NetworkRule{TableFamily: "ip", Chain: "OUTPUT", RuleContent: outputRule},
+			NetworkRule{TableFamily: "ip6", Chain: "INPUT", RuleContent: inputRule},
+			NetworkRule{TableFamily: "ip6", Chain: "OUTPUT", RuleContent: outputRule},
+		)
+
+		ne.Rules = newRules
+
+		if err := ne.applyNFTables(hasAllowPolicy); err != nil {
+			ne.Logger.Errf("Failed to apply network policies: %v", err)
+		}
+
+		namespacesWithPolicy := map[string]bool{}
+		for _, policy := range secPolicies {
+			if ns, ok := policy.Metadata["namespaceName"]; ok {
+				namespacesWithPolicy[ns] = true
+			}
+		}
+
+		for namespace, posture := range defaultPostures {
+			if strings.EqualFold(posture.NetworkAction, "block") && !namespacesWithPolicy[namespace] {
+				podIPs := podsByNamespace[namespace]
+				for _, podIP := range podIPs {
+					// Exempt DNS first — prevents CoreDNS blackout
+					newRules = append(newRules,
+						NetworkRule{
+							TableFamily: "ip",
+							Chain:       "OUTPUT",
+							RuleContent: fmt.Sprintf("ip saddr %s udp dport 53 accept", podIP),
+						},
+						NetworkRule{
+							TableFamily: "ip",
+							Chain:       "OUTPUT",
+							RuleContent: fmt.Sprintf("ip saddr %s tcp dport 53 accept", podIP),
+						},
+						NetworkRule{
+							TableFamily: "ip",
+							Chain:       "OUTPUT",
+							RuleContent: fmt.Sprintf(
+								"ip saddr %s log prefix \"Default OUTPUT Block\" group 0 drop",
+								podIP,
+							),
+						},
+						NetworkRule{
+							TableFamily: "ip6",
+							Chain:       "OUTPUT",
+							RuleContent: fmt.Sprintf(
+								"ip6 saddr %s log prefix \"Default OUTPUT Block\" group 0 drop",
+								podIP,
+							),
+						},
+					)
+				}
+			}
+		}
 	}
 }
 
